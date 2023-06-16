@@ -155,12 +155,16 @@ def collate(
     if samples[0].get("constraints", None) is not None:
         # Collate the packed constraints across the samples, padding to
         # the length of the longest sample.
-        lens = [sample.get("constraints").size(0) for sample in samples]
-        max_len = max(lens)
-        constraints = torch.zeros((len(samples), max(lens))).long()
-        for i, sample in enumerate(samples):
-            constraints[i, 0 : lens[i]] = samples[i].get("constraints")
-        batch["constraints"] = constraints.index_select(0, sort_order)
+        if type(samples[0]["constraints"]) in (tuple, list):
+            # when they are list, we are using early stop constraints decoding, no need to pad a batch tensor
+            batch["constraints"] = [samples[i]["constraints"] for i in sort_order]
+        else:
+            lens = [sample.get("constraints").size(0) for sample in samples]
+            max_len = max(lens)
+            constraints = torch.zeros((len(samples), max(lens))).long()
+            for i, sample in enumerate(samples):
+                constraints[i, 0 : lens[i]] = samples[i].get("constraints")
+            batch["constraints"] = constraints.index_select(0, sort_order)
 
     return batch
 

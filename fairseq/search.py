@@ -302,7 +302,7 @@ class LexicallyConstrainedBeamSearch(Search):
             # Just take the k-best. We'll get another k from the 1-best from each
             # row, plus more from the constraints
             beam_size * 2,
-            lprobs.view(batch_size, -1).size(1) - 1,  # -1 so we never select pad
+            lprobs.reshape(batch_size, -1).size(1) - 1,  # -1 so we never select pad
         )
 
         # STEP 0: Preliminary. Prevent EOS for unfinished hyps across all batch items

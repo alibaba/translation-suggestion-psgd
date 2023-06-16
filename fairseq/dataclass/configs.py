@@ -1001,6 +1001,10 @@ class GenerationConfig(FairseqDataclass):
         default=None,
         metadata={"help": "EOS token"},
     )
+    patience: Optional[int] = field(
+        default=0,
+        metadata={"help": "use constrained decoding with patience"}
+    )
 
 
 @dataclass

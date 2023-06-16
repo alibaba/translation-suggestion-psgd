@@ -404,7 +404,7 @@ class FairseqTask(object):
         diverse_beam_strength = getattr(args, "diverse_beam_strength", 0.5)
         match_source_len = getattr(args, "match_source_len", False)
         diversity_rate = getattr(args, "diversity_rate", -1)
-        constrained = getattr(args, "constraints", False)
+        constrained = getattr(args, "constraints", False) and getattr(args, "patience") <= 0
         if prefix_allowed_tokens_fn is None:
             prefix_allowed_tokens_fn = getattr(args, "prefix_allowed_tokens_fn", None)
         if (
@@ -531,11 +531,11 @@ class FairseqTask(object):
         raise NotImplementedError
 
     def inference_step(
-        self, generator, models, sample, prefix_tokens=None, constraints=None
+        self, generator, models, sample, prefix_tokens=None, constraints=None, patience=0, **kwargs
     ):
         with torch.no_grad():
             return generator.generate(
-                models, sample, prefix_tokens=prefix_tokens, constraints=constraints
+                models, sample, prefix_tokens=prefix_tokens, constraints=constraints, patience=patience, **kwargs
             )
 
     def begin_epoch(self, epoch, model):

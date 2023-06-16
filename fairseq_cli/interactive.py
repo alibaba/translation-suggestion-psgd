@@ -76,7 +76,10 @@ def make_batches(lines, cfg, task, max_positions, encode_fn):
             ]
 
     if cfg.generation.constraints:
-        constraints_tensor = pack_constraints(batch_constraints)
+        if cfg.generation.patience <= 0:
+            constraints_tensor = pack_constraints(batch_constraints)
+        else:
+            constraints_tensor = batch_constraints
     else:
         constraints_tensor = None
 
@@ -215,7 +218,8 @@ def main(cfg: FairseqConfig):
                 src_tokens = src_tokens.cuda()
                 src_lengths = src_lengths.cuda()
                 if constraints is not None:
-                    constraints = constraints.cuda()
+                    if cfg.generation.patience == 0:
+                        constraints = constraints.cuda()
 
             sample = {
                 "net_input": {
@@ -225,13 +229,16 @@ def main(cfg: FairseqConfig):
             }
             translate_start_time = time.time()
             translations = task.inference_step(
-                generator, models, sample, constraints=constraints
+                generator, models, sample, constraints=constraints, patience=cfg.generation.patience
             )
             translate_time = time.time() - translate_start_time
             total_translate_time += translate_time
             list_constraints = [[] for _ in range(bsz)]
             if cfg.generation.constraints:
-                list_constraints = [unpack_constraints(c) for c in constraints]
+                if cfg.generation.patience == 0:
+                    list_constraints = [unpack_constraints(c) for c in constraints]
+                else:
+                    list_constraints = constraints
             for i, (id, hypos) in enumerate(zip(batch.ids.tolist(), translations)):
                 src_tokens_i = utils.strip_pad(src_tokens[i], tgt_dict.pad())
                 constraints = list_constraints[i]

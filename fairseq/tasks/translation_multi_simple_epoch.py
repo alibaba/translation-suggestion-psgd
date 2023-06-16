@@ -169,10 +169,10 @@ class TranslationMultiSimpleEpochTask(LegacyFairseqTask):
         )
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):
-        if constraints is not None:
-            raise NotImplementedError(
-                "Constrained decoding with the multilingual_translation task is not supported"
-            )
+        # if constraints is not None:
+        #     raise NotImplementedError(
+        #         "Constrained decoding with the multilingual_translation task is not supported"
+        #     )
 
         src_data = ListDataset(src_tokens, src_lengths)
         dataset = LanguagePairDataset(src_data, src_lengths, self.source_dictionary)

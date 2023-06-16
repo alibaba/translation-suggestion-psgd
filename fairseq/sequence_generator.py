@@ -2,8 +2,10 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-
+import heapq
+import itertools
 import math
+import numpy as np
 import sys
 from typing import Dict, List, Optional
 
@@ -196,7 +198,12 @@ class SequenceGenerator(nn.Module):
         prefix_tokens: Optional[Tensor] = None,
         constraints: Optional[Tensor] = None,
         bos_token: Optional[int] = None,
+        patience: Optional[int] = 0,
+        **kwargs
     ):
+        if patience > 0:
+            assert constraints is None or type(constraints) in (tuple, list)
+            return self._generate_with_constraints_early_stop(sample, constraints, bos_token, patience, **kwargs)
         incremental_states = torch.jit.annotate(
             List[Dict[str, Dict[str, Optional[Tensor]]]],
             [
@@ -341,7 +348,7 @@ class SequenceGenerator(nn.Module):
                 lprobs, avg_attn_scores = self.model.forward_decoder(
                     tokens[:, : step + 1],
                     encoder_outs,
-                    incremental_states,
+                    None,  # incremental_states,
                     self.temperature,
                 )
 
@@ -570,6 +577,390 @@ class SequenceGenerator(nn.Module):
             )
         return finalized
 
+    def _generate_with_constraints_early_stop(
+            self,
+            sample: Dict[str, Dict[str, Tensor]],
+            constraints: List[List[List]] = None,
+            bos_token: Optional[int] = None,
+            patience=10,
+    ):
+        bos_token = self.eos if bos_token is None else bos_token
+        incremental_states = torch.jit.annotate(
+            List[Dict[str, Dict[str, Optional[Tensor]]]],
+            [
+                torch.jit.annotate(Dict[str, Dict[str, Optional[Tensor]]], {})
+                for i in range(self.model.models_size)
+            ],
+        )
+        net_input = sample["net_input"]
+
+        if "src_tokens" in net_input:
+            src_tokens = net_input["src_tokens"]
+            # length of the source text being the character length except EndOfSentence and pad
+            src_lengths = (
+                (src_tokens.ne(self.eos) & src_tokens.ne(self.pad)).long().sum(dim=1)
+            )
+        elif "source" in net_input:
+            src_tokens = net_input["source"]
+            src_lengths = (
+                net_input["padding_mask"].size(-1) - net_input["padding_mask"].sum(-1)
+                if net_input["padding_mask"] is not None
+                else torch.tensor(src_tokens.size(-1)).to(src_tokens)
+            )
+        elif "features" in net_input:
+            src_tokens = net_input["features"]
+            src_lengths = (
+                net_input["padding_mask"].size(-1) - net_input["padding_mask"].sum(-1)
+                if net_input["padding_mask"] is not None
+                else torch.tensor(src_tokens.size(-1)).to(src_tokens)
+            )
+        else:
+            raise Exception(
+                "expected src_tokens or source in net input. input keys: "
+                + str(net_input.keys())
+            )
+        bsz, src_len = src_tokens.size()[:2]
+        beam_size = self.beam_size
+
+        max_len: int = -1
+        if self.match_source_len:
+            max_len = src_lengths.max().item()
+        else:
+            max_len = min(
+                int(self.max_len_a * src_len + self.max_len_b),
+                self.max_len - 1,
+            )
+        assert (
+                self.min_len <= max_len
+        ), "min_len cannot be larger than max_len, please adjust these!"
+        # compute the encoder output for each beam
+        with torch.autograd.profiler.record_function("EnsembleModel: forward_encoder"):
+            encoder_outs = self.model.forward_encoder(net_input)
+
+        # placeholder of indices for bsz * beam_size to hold tokens and accumulative scores
+        new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)
+        new_order = new_order.to(src_tokens.device).long()
+        encoder_outs = self.model.reorder_encoder_out(encoder_outs, new_order)
+        # ensure encoder_outs is a List.
+        assert encoder_outs is not None
+
+        # initialize buffers
+        scores = (
+            torch.zeros(bsz * beam_size, max_len + 1).to(src_tokens).float()
+        )  # +1 for eos; pad is never chosen for scoring
+
+        scores_full_indices = torch.arange(max_len + 1).repeat(bsz * beam_size, 1).to(new_order)
+        tokens = (
+            torch.zeros(bsz * beam_size, max_len + 2)
+            .to(src_tokens)
+            .long()
+            .fill_(self.pad)
+        )  # +2 for eos and pad
+        tokens_indices = torch.arange(-1, max_len + 1).repeat(bsz * beam_size, 1).to(scores_full_indices)
+        attn: Optional[Tensor] = None
+        # constraints: bsz*C*L
+        if constraints is None:
+            constraints = [[] for _ in range(bsz)]
+        # extract prefix
+        prefix_constraints = [c_list[0] if len(c_list) > 0 and c_list[0][0] == bos_token else c_list for c_list in
+                              constraints]
+        prefix_constraints_array = np.empty((len(prefix_constraints),), dtype=object)
+        prefix_constraints_array[...] = prefix_constraints
+        prefix_constraints = np.repeat(prefix_constraints_array, beam_size, axis=0)
+        # extract suffix
+        suffix_constraints = [c_list[1:] if len(c_list) > 0 and c_list[0][0] == bos_token else c_list for c_list in
+                              constraints]
+        suffix_constraints = [c_list if len(c_list) > 0 and c_list[-1][-1] == self.eos else (c_list + [[self.eos]]) for
+                              c_list in suffix_constraints]
+        suffix_constraints_array = np.empty((len(suffix_constraints),), dtype=object)
+        suffix_constraints_array[...] = suffix_constraints
+        suffix_constraints = np.repeat(suffix_constraints_array, beam_size, axis=0)
+        # the steps that the decoding process starts at, depending on the length of prefix
+        start_steps = torch.Tensor([len(x) - 1 for x in prefix_constraints]).to(tokens)
+        # the steps that is being generated now
+        steps = start_steps + 1
+        # copy prefix to the token tensor, then we don't need to decode these tokens
+        for i, prefix in enumerate(prefix_constraints):
+            prefix_token_num = len(prefix)
+            tokens[i, : prefix_token_num] = prefix.to(tokens)
+        # list of completed sentences
+        finalized = torch.jit.annotate(
+            List[List[Dict[str, Tensor]]],
+            [torch.jit.annotate(List[Dict[str, Tensor]], []) for i in range(bsz)],
+        )  # contains lists of dictionaries of infomation about the hypothesis being finalized at each step
+        # a heap to store best candidates (score, batch_id, beam_id, candidate_info)
+        finalized_heap = [[(-np.inf, -1, -1, {"tokens": "</s>"}) for j in range(beam_size)] for i in range(bsz)]
+        for hp in finalized_heap:
+            heapq.heapify(hp)
+        # the best candidates haven't been updated for `heap_no_change_steps` steps. This is used to stop decoding
+        heap_no_change_steps = torch.zeros(bsz).type_as(src_tokens).to(src_tokens.device)
+
+        # the sentences at the `active_bsz_idx` are not finished
+        active_bsz_idx = torch.arange(bsz).type_as(src_tokens).to(src_tokens.device)
+
+        # number of candidate hypos per step
+        cand_size = 2 * beam_size
+
+        # offset arrays for converting between different indexing schemes
+        bbsz_offsets = (
+            (torch.arange(0, bsz) * beam_size)
+            .unsqueeze(1)
+            .type_as(tokens)
+            .to(src_tokens.device)
+        )
+        cand_bbsz_offsets = (
+            (torch.arange(0, bsz) * cand_size)
+            .unsqueeze(1)
+            .type_as(tokens)
+            .to(src_tokens.device)
+        )
+        active_hypos_cand_idx = torch.arange(0, beam_size).repeat(bsz, 1).type_as(tokens).to(src_tokens.device).add(
+            cand_bbsz_offsets).view(-1)
+        cand_offsets = torch.arange(0, cand_size).type_as(tokens).to(src_tokens.device)
+        lprobs_offsets = (
+            (torch.arange(0, bsz) * beam_size * self.vocab_size)
+            .unsqueeze(1)
+            .type_as(tokens)
+            .to(src_tokens.device)
+        )
+
+        original_batch_idxs: Optional[Tensor] = None
+        if "id" in sample and isinstance(sample["id"], Tensor):
+            original_batch_idxs = sample["id"]
+        else:
+            original_batch_idxs = torch.arange(0, bsz).type_as(tokens)
+
+        reorder_state: Optional[Tensor] = None
+        batch_idxs: Optional[Tensor] = None
+        start_step = True
+        while True:
+            # reorder decoder internal states based on the prev choice of beams
+            if reorder_state is not None:
+                if batch_idxs is not None:
+                    # update beam indices to take into account removed sentences
+                    corr = batch_idxs - torch.arange(batch_idxs.numel()).type_as(
+                        batch_idxs
+                    )
+                    reorder_state.view(-1, beam_size).add_(
+                        corr.unsqueeze(-1) * beam_size
+                    )
+                    original_batch_idxs = original_batch_idxs[batch_idxs]
+                self.model.reorder_incremental_state(incremental_states, reorder_state)
+                encoder_outs = self.model.reorder_encoder_out(
+                    encoder_outs, reorder_state
+                )
+
+            current_max_step = steps.max()
+            # the following lines are used to concat tokens with suffixs, and removing paddings between them caused by batch padding
+            suffixs = [list(itertools.chain(*x)) for x in suffix_constraints]
+            suffix_lens = torch.Tensor([len(x) for x in suffixs]).to(steps)
+            suffixs_padded = torch.nn.utils.rnn.pad_sequence(
+                [torch.Tensor(x) for x in suffixs], batch_first=True, padding_value=self.pad).to(tokens)
+            tokens_with_suffixs = torch.cat([tokens[:, :current_max_step], suffixs_padded], dim=-1)
+            tokens_with_suffixs_real_lens = steps + suffix_lens  # +1 for bos token
+            tokens_with_suffixs = torch.nn.utils.rnn.pad_sequence(
+                torch.split(tokens_with_suffixs[tokens_with_suffixs.ne(self.pad)],
+                            tokens_with_suffixs_real_lens.tolist()), batch_first=True, padding_value=self.pad).to(
+                tokens)
+            # this is the length for the whole sequence including suffix
+            current_max_len = (tokens_with_suffixs_real_lens - 1).max()
+            # masks for the previous, current and next step, used to pick candidate tokens of the next step
+            previous_step_mask = torch.arange(current_max_len).repeat(bsz * beam_size, 1).to(steps).lt(
+                (steps - 1).unsqueeze(-1))
+            current_steps_mask = torch.arange(current_max_len).repeat(bsz * beam_size, 1).to(steps).eq(
+                (steps - 1).unsqueeze(-1))
+            next_steps_mask = torch.arange(current_max_step + 1).repeat(bsz * beam_size, 1).to(steps).eq(
+                steps.unsqueeze(-1))
+
+            with torch.autograd.profiler.record_function(
+                    "EnsembleModel: forward_decoder"
+            ):
+                # forward the whole sequence with suffix
+                lprobs, avg_attn_scores_with_suffix = self.model.forward_decoder(
+                    tokens_with_suffixs[:, : current_max_len],
+                    encoder_outs,
+                    None,
+                    self.temperature,
+                    return_all_prob=True
+                )
+
+            # find candidates for the next step token
+            current_step_lprobs = lprobs[current_steps_mask]
+            previous_tokens = tokens[:, 1:current_max_step]
+            previous_steps_lprobs = torch.mul(lprobs, previous_step_mask.unsqueeze(-1))[:, : current_max_step - 1,
+                                    :].gather(-1, previous_tokens.unsqueeze(-1)).squeeze(
+                -1)  # set probs of future steps to 0
+
+            scores[:, :current_max_step - 1] = previous_steps_lprobs.cumsum(dim=1)
+            # sequence probs for tokens[:,1:steps]+candidates at steps
+            lprobs_for_candidates = current_step_lprobs + scores[:, current_max_step - 1:current_max_step]
+
+            lprobs_for_candidates[lprobs_for_candidates != lprobs_for_candidates] = torch.tensor(-math.inf).to(lprobs)
+            lprobs_for_candidates[:, self.pad] = -math.inf  # never select pad
+            lprobs_for_candidates[:, self.unk] -= self.unk_penalty  # apply unk penalty
+            # never select eos in constrained decoding. Instead, stop decoding by maximize overall sequence prob
+            lprobs_for_candidates[:, self.eos] = -math.inf
+
+            lprobs_for_candidates = lprobs_for_candidates.view(bsz, beam_size, self.vocab_size)
+            if start_step:
+                # at the first step all hypotheses are equally likely, so use only the first beam
+                lprobs_for_candidates = lprobs_for_candidates[:, ::beam_size, :].contiguous()
+            top_prediction = torch.topk(
+                lprobs_for_candidates.view(bsz, -1),
+                k=min(
+                    # Take the best cand_size predictions
+                    cand_size,
+                    lprobs_for_candidates.view(bsz, -1).size(1) - 1,  # -1 so we never select pad
+                ),
+            )
+            cand_scores = top_prediction[0].view(bsz, -1)
+            cand_indices = top_prediction[1].view(bsz, -1)
+            cand_beams = torch.div(cand_indices, self.vocab_size, rounding_mode="trunc")
+            cand_indices = cand_indices.fmod(self.vocab_size)
+            # cand_bbsz_idx contains beam indices for the top candidate hypotheses,
+            # with a range of values: [0, bsz*beam_size) and dimensions: [bsz, cand_size]
+            cand_bbsz_idx = cand_beams.add(bbsz_offsets)
+            cand_steps = steps[cand_bbsz_idx.view(-1)]
+            cand_start_steps = start_steps[cand_bbsz_idx.view(-1)]
+            # concat previous tokens with candidates
+            tokens_with_candidates = tokens[cand_bbsz_idx.view(-1), :current_max_step + 1]
+            tokens_with_candidates[next_steps_mask[cand_bbsz_idx.view(-1)]] = cand_indices.view(-1)
+
+            # find candidates of the overall sequence
+            length_mask = torch.arange(current_max_len).repeat(tokens_with_suffixs_real_lens.size(0), 1) \
+                .to(steps).lt((tokens_with_suffixs_real_lens - 1).unsqueeze(-1))
+            output_tokens = tokens_with_suffixs[:, 1:]  # has eos but no bos
+            lprobs_output_tokens = torch.mul(lprobs, length_mask.unsqueeze(-1))[:, :, :] \
+                .gather(-1, output_tokens.unsqueeze(-1)).squeeze(-1)  # set probs of future steps to 0
+            # averaged scores of the whole sequence including suffix (divided by sequence length)
+            cand_scores_avg = lprobs_output_tokens.sum(dim=1) \
+                .div((tokens_with_suffixs_real_lens - 1) ** self.len_penalty)
+            # find top beam-size candidates by the sequence score
+            top_cands_scores, top_cands_indices = torch.topk(cand_scores_avg.reshape(bsz, beam_size), k=beam_size)
+            attn_clone = avg_attn_scores_with_suffix.view(bsz, beam_size, -1)
+            for i in range(bsz):
+                pushed_flag = False
+                original_bsz_idx = active_bsz_idx[i]
+                for j in range(beam_size):
+                    # gather infos of the candidate
+                    cand_score, cand_indice = top_cands_scores[i][j], top_cands_indices[i][j]
+                    cand_bbsz_indice = i * beam_size + cand_indice
+                    cand_tokens = output_tokens.view(bsz, beam_size, -1)[i, cand_indice, :]
+                    cand_tokens_len = (tokens_with_suffixs_real_lens - 1).view(bsz, beam_size)[i, cand_indice]
+                    cand_tokens = cand_tokens[: cand_tokens_len]
+                    cand_score_list = scores[cand_bbsz_indice, :cand_tokens_len]
+                    cand_step = steps[cand_bbsz_indice]
+                    cand_info = {
+                        "tokens": cand_tokens,
+                        "score": cand_score,
+                        "attention": attn_clone[i, cand_indice, :],
+                        "alignment": torch.empty(0),
+                        "positional_scores": cand_score_list[1:] - cand_score_list[:-1],
+                        "scores": cand_score_list
+                    }
+                    cand = (cand_score, cand_step, j, cand_info)
+                    if start_step:
+                        continue
+                    # try to push it into the heap
+                    pop_cand = heapq.heappushpop(finalized_heap[original_bsz_idx], cand)
+                    if pop_cand[:3] != cand[:3]:
+                        pushed_flag = True
+                        del pop_cand
+                    else:
+                        del pop_cand
+                        break
+                if pushed_flag:
+                    # if the heap changed, then set heap_no_change_steps of this idx to 0
+                    heap_no_change_steps[original_bsz_idx] = 0
+                else:
+                    # if the heap changed, then add 1 to heap_no_change_steps of this idx.
+                    heap_no_change_steps[original_bsz_idx] += 1
+
+            start_step = False
+            # construct batch_idxs which holds indices of batches to keep for the next pass
+            # when heap_no_change_steps increased to the early-stopping patience, terminate the decoding process
+            batch_mask = heap_no_change_steps[active_bsz_idx].lt(patience)
+            if not all(batch_mask):
+                new_bsz = sum(batch_mask)
+                # TODO replace `nonzero(as_tuple=False)` after TorchScript supports it
+                batch_idxs = torch.arange(
+                    bsz, device=cand_indices.device
+                ).masked_select(batch_mask)
+
+                # Choose the subset of the hypothesized constraints that will continue
+                self.search.prune_sentences(batch_idxs)
+
+                cand_beams = cand_beams[batch_idxs]
+                bbsz_offsets.resize_(new_bsz, 1)
+                cand_bbsz_offsets.resize_(new_bsz, 1)
+                cand_bbsz_idx = cand_beams.add(bbsz_offsets)
+                cand_scores = cand_scores[batch_idxs]
+                cand_indices = cand_indices[batch_idxs]
+
+                cand_steps = cand_steps.view(bsz, cand_size)[batch_idxs].view(-1)
+                cand_start_steps = cand_start_steps.view(bsz, cand_size)[batch_idxs].view(-1)
+
+                tokens_with_candidates = tokens_with_candidates.view(bsz, cand_size, -1)[batch_idxs].view(
+                    new_bsz * cand_size, tokens_with_candidates.shape[-1])
+                batch_idxs_cpu = batch_idxs.cpu()
+                prefix_constraints = prefix_constraints.reshape(bsz, beam_size)[batch_idxs_cpu].reshape(-1)
+                suffix_constraints = suffix_constraints.reshape(bsz, beam_size)[batch_idxs_cpu].reshape(-1)
+                src_lengths = src_lengths[batch_idxs]
+                scores = scores.view(bsz, -1)[batch_idxs].view(new_bsz * beam_size, scores.shape[-1])
+                tokens = tokens.view(bsz, -1)[batch_idxs].view(new_bsz * beam_size, tokens.shape[-1])
+                if attn is not None:
+                    attn = attn.view(bsz, -1)[batch_idxs].view(
+                        new_bsz * beam_size, attn.size(1), -1
+                    )
+                bsz = new_bsz
+                active_bsz_idx = active_bsz_idx.masked_select(batch_mask)
+                active_hypos_cand_idx = torch.arange(0, beam_size).repeat(bsz, 1).type_as(tokens).to(
+                    src_tokens.device).add(cand_bbsz_offsets).view(-1)
+            else:
+                batch_idxs = None
+            if active_bsz_idx.numel() == 0 or current_max_step >= max_len:
+                for sent, hp in enumerate(finalized_heap):
+                    while len(hp) > 0:
+                        finalized[sent].insert(0, heapq.heappop(hp)[-1])
+                break
+            active_bbsz_idx = cand_bbsz_idx[:, :beam_size]
+            active_scores = cand_scores[:, :beam_size]
+
+            active_bbsz_idx = active_bbsz_idx.reshape(-1)
+            active_scores = active_scores.reshape(-1)
+
+            # copy tokens and scores for active hypotheses
+
+            # Set the tokens for each beam (can select the same row more than once)
+            tokens[:, : current_max_step + 1] = torch.index_select(
+                tokens[:, : current_max_step + 1], dim=0, index=active_bbsz_idx
+            )
+            scores[:, : current_max_step] = torch.index_select(
+                scores[:, : current_max_step], dim=0, index=active_bbsz_idx
+            )
+            # Select the next token for each of them
+            cand_steps = cand_steps[active_hypos_cand_idx]
+            cand_start_steps = cand_start_steps[active_hypos_cand_idx]
+            tokens_with_candidates = tokens_with_candidates[active_hypos_cand_idx]
+            tokens_with_candidates_index = torch.arange(tokens_with_candidates.size(-1)).to(
+                tokens_with_candidates).repeat(bsz * beam_size, 1)
+            tokens_with_candidates_mask = tokens_with_candidates_index.gt(cand_steps.unsqueeze(-1))
+            tokens_with_candidates[tokens_with_candidates_mask] = self.pad
+            tokens[:, :tokens_with_candidates.size(1)] = tokens_with_candidates
+
+            # copy attention for active hypotheses
+            if attn is not None:
+                attn[:, :, : current_max_len + 1] = torch.index_select(
+                    attn[:, :, : current_max_len + 1], dim=0, index=active_bbsz_idx
+                )
+
+            # reorder incremental state in decoder
+            reorder_state = active_bbsz_idx
+            steps = cand_steps + 1
+            start_steps = cand_start_steps
+        torch.cuda.empty_cache()
+        return finalized
+
     def _prefix_tokens(
         self, step: int, lprobs, scores, tokens, prefix_tokens, beam_size: int
     ):
@@ -790,6 +1181,7 @@ class EnsembleModel(nn.Module):
         encoder_outs: List[Dict[str, List[Tensor]]],
         incremental_states: List[Dict[str, Dict[str, Optional[Tensor]]]],
         temperature: float = 1.0,
+        return_all_prob: bool = False
     ):
         log_probs = []
         avg_attn: Optional[Tensor] = None
@@ -798,7 +1190,7 @@ class EnsembleModel(nn.Module):
             if self.has_encoder():
                 encoder_out = encoder_outs[i]
             # decode each model
-            if self.has_incremental_states():
+            if self.has_incremental_states() and incremental_states is not None:
                 decoder_out = model.decoder.forward(
                     tokens,
                     encoder_out=encoder_out,
@@ -825,13 +1217,14 @@ class EnsembleModel(nn.Module):
                     attn = attn[:, -1, :]
 
             decoder_out_tuple = (
-                decoder_out[0][:, -1:, :].div_(temperature),
+                decoder_out[0].div_(temperature),  # decoder_out[0][:, -1:, :].div_(temperature),
                 None if decoder_len <= 1 else decoder_out[1],
             )
             probs = model.get_normalized_probs(
                 decoder_out_tuple, log_probs=True, sample=None
             )
-            probs = probs[:, -1, :]
+            if not return_all_prob:
+                probs = probs[:, -1, :]
             if self.models_size == 1:
                 return probs, attn
 
