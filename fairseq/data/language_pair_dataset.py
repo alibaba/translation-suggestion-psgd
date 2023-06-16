@@ -9,18 +9,19 @@ import numpy as np
 import torch
 from fairseq.data import FairseqDataset, data_utils
 
+
 logger = logging.getLogger(__name__)
 
 
 def collate(
-        samples,
-        pad_idx,
-        eos_idx,
-        left_pad_source=True,
-        left_pad_target=False,
-        input_feeding=True,
-        pad_to_length=None,
-        pad_to_multiple=1,
+    samples,
+    pad_idx,
+    eos_idx,
+    left_pad_source=True,
+    left_pad_target=False,
+    input_feeding=True,
+    pad_to_length=None,
+    pad_to_multiple=1,
 ):
     if len(samples) == 0:
         return {}
@@ -40,8 +41,8 @@ def collate(
         if alignment is None or len(alignment) == 0:
             return False
         if (
-                alignment[:, 0].max().item() >= src_len - 1
-                or alignment[:, 1].max().item() >= tgt_len - 1
+            alignment[:, 0].max().item() >= src_len - 1
+            or alignment[:, 1].max().item() >= tgt_len - 1
         ):
             logger.warning("alignment size mismatch found, skipping alignment!")
             return False
@@ -154,36 +155,12 @@ def collate(
     if samples[0].get("constraints", None) is not None:
         # Collate the packed constraints across the samples, padding to
         # the length of the longest sample.
-        if type(samples[0]["constraints"]) in (tuple, list):
-            # when they are list, we are using early stop constraints decoding, no need to pad a batch tensor
-            batch["constraints"] = [samples[i]["constraints"] for i in sort_order]
-        else:
-            lens = [sample.get("constraints").size(0) for sample in samples]
-            max_len = max(lens)
-            constraints = torch.zeros((len(samples), max(lens))).long()
-            for i, sample in enumerate(samples):
-                constraints[i, 0: lens[i]] = samples[i].get("constraints")
-            batch["constraints"] = constraints.index_select(0, sort_order)
-    if samples[0].get("prefix_tokens", None) is not None:
-        lens = [sample["prefix_tokens"].size(0) for sample in samples]
+        lens = [sample.get("constraints").size(0) for sample in samples]
         max_len = max(lens)
-        if max_len == 0:
-            batch["prefix_tokens"] = None
-        else:
-            prefix_tokens = torch.zeros((len(samples), max_len)).long()
-            for i, sample in enumerate(samples):
-                prefix_tokens[i, 0:lens[i]] = samples[i]["prefix_tokens"]
-            batch["prefix_tokens"] = prefix_tokens.index_select(0, sort_order)
-    if samples[0].get("suffix_tokens", None) is not None:
-        lens = [sample["suffix_tokens"].size(0) for sample in samples]
-        max_len = max(lens)
-        if max_len == 0:
-            batch["suffix_tokens"] = None
-        else:
-            suffix_tokens = torch.zeros((len(samples), max_len)).long()
-            for i, sample in enumerate(samples):
-                suffix_tokens[i, 0:lens[i]] = samples[i].get("suffix_tokens")
-            batch["suffix_tokens"] = suffix_tokens.index_select(0, sort_order)
+        constraints = torch.zeros((len(samples), max(lens))).long()
+        for i, sample in enumerate(samples):
+            constraints[i, 0 : lens[i]] = samples[i].get("constraints")
+        batch["constraints"] = constraints.index_select(0, sort_order)
 
     return batch
 
@@ -228,29 +205,27 @@ class LanguagePairDataset(FairseqDataset):
     """
 
     def __init__(
-            self,
-            src,
-            src_sizes,
-            src_dict,
-            tgt=None,
-            tgt_sizes=None,
-            tgt_dict=None,
-            left_pad_source=True,
-            left_pad_target=False,
-            shuffle=True,
-            input_feeding=True,
-            remove_eos_from_source=False,
-            append_eos_to_target=False,
-            align_dataset=None,
-            constraints=None,
-            append_bos=False,
-            eos=None,
-            num_buckets=0,
-            src_lang_id=None,
-            tgt_lang_id=None,
-            pad_to_multiple=1,
-            prefix=None,
-            suffix=None
+        self,
+        src,
+        src_sizes,
+        src_dict,
+        tgt=None,
+        tgt_sizes=None,
+        tgt_dict=None,
+        left_pad_source=True,
+        left_pad_target=False,
+        shuffle=True,
+        input_feeding=True,
+        remove_eos_from_source=False,
+        append_eos_to_target=False,
+        align_dataset=None,
+        constraints=None,
+        append_bos=False,
+        eos=None,
+        num_buckets=0,
+        src_lang_id=None,
+        tgt_lang_id=None,
+        pad_to_multiple=1,
     ):
         if tgt_dict is not None:
             assert src_dict.pad() == tgt_dict.pad()
@@ -280,11 +255,9 @@ class LanguagePairDataset(FairseqDataset):
         self.align_dataset = align_dataset
         if self.align_dataset is not None:
             assert (
-                    self.tgt_sizes is not None
+                self.tgt_sizes is not None
             ), "Both source and target needed when alignments are provided"
         self.constraints = constraints
-        self.prefix = prefix
-        self.suffix = suffix
         self.append_bos = append_bos
         self.eos = eos if eos is not None else src_dict.eos()
         self.src_lang_id = src_lang_id
@@ -363,10 +336,6 @@ class LanguagePairDataset(FairseqDataset):
             example["alignment"] = self.align_dataset[index]
         if self.constraints is not None:
             example["constraints"] = self.constraints[index]
-        if self.prefix is not None:
-            example["prefix_tokens"] = self.prefix[index]
-        if self.suffix is not None:
-            example["suffix_tokens"] = self.suffix[index]
         return example
 
     def __len__(self):
@@ -423,11 +392,11 @@ class LanguagePairDataset(FairseqDataset):
             bsz = src_tokens.size(0)
             if self.src_lang_id is not None:
                 res["net_input"]["src_lang_id"] = (
-                    torch.LongTensor([[self.src_lang_id]]).expand(bsz, 1).to(src_tokens).clone()
+                    torch.LongTensor([[self.src_lang_id]]).expand(bsz, 1).to(src_tokens)
                 )
             if self.tgt_lang_id is not None:
                 res["tgt_lang_id"] = (
-                    torch.LongTensor([[self.tgt_lang_id]]).expand(bsz, 1).to(src_tokens).clone()
+                    torch.LongTensor([[self.tgt_lang_id]]).expand(bsz, 1).to(src_tokens)
                 )
         return res
 
@@ -477,7 +446,7 @@ class LanguagePairDataset(FairseqDataset):
     @property
     def supports_prefetch(self):
         return getattr(self.src, "supports_prefetch", False) and (
-                getattr(self.tgt, "supports_prefetch", False) or self.tgt is None
+            getattr(self.tgt, "supports_prefetch", False) or self.tgt is None
         )
 
     def prefetch(self, indices):

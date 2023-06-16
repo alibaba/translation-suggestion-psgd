@@ -134,7 +134,6 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
         features_only: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
-        src_lang_id: Optional[Tensor] = None
     ):
         """
         Run the forward pass for an encoder-decoder model.

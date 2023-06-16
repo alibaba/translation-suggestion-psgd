@@ -28,20 +28,12 @@ from fairseq.data import (
 from fairseq.data.indexed_dataset import get_available_dataset_impl
 from fairseq.dataclass import ChoiceEnum, FairseqDataclass
 from fairseq.tasks import FairseqTask, register_task
-from fairseq.scoring.tokenizer import EvaluationTokenizer
 
 
 EVAL_BLEU_ORDER = 4
 
 
 logger = logging.getLogger(__name__)
-
-
-def get_symbols_to_strip_from_output(generator):
-    if hasattr(generator, "symbols_to_strip_from_output"):
-        return generator.symbols_to_strip_from_output
-    else:
-        return {generator.eos}
 
 
 def load_langpair_dataset(
@@ -270,9 +262,6 @@ class TranslationConfig(FairseqDataclass):
     eval_bleu_print_samples: bool = field(
         default=False, metadata={"help": "print sample generations during validation"}
     )
-    sacrebleu_tokenizer: EvaluationTokenizer.ALL_TOKENIZER_TYPES = field(
-        default="13a", metadata={"help": "tokenizer"}
-    )
 
 
 @register_task("translation", dataclass=TranslationConfig)
@@ -367,15 +356,13 @@ class TranslationTask(FairseqTask):
             pad_to_multiple=self.cfg.required_seq_len_multiple,
         )
 
-    def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None, prefix_tokens=None, suffix_tokens=None):
+    def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):
         return LanguagePairDataset(
             src_tokens,
             src_lengths,
             self.source_dictionary,
             tgt_dict=self.target_dictionary,
             constraints=constraints,
-            prefix=prefix_tokens,
-            suffix=suffix_tokens
         )
 
     def build_model(self, cfg, from_checkpoint=False):
@@ -422,42 +409,42 @@ class TranslationTask(FairseqTask):
             for i in range(EVAL_BLEU_ORDER):
                 counts.append(sum_logs("_bleu_counts_" + str(i)))
                 totals.append(sum_logs("_bleu_totals_" + str(i)))
-            # logger.info('counts: ', str(counts))
-            # logger.info('totals: ', str(totals))
-            # if max(totals) > 0:
-            # log counts as numpy arrays -- log_scalar will sum them correctly
-            metrics.log_scalar("_bleu_counts", np.array(counts))
-            metrics.log_scalar("_bleu_totals", np.array(totals))
-            metrics.log_scalar("_bleu_sys_len", sum_logs("_bleu_sys_len"))
-            metrics.log_scalar("_bleu_ref_len", sum_logs("_bleu_ref_len"))
 
-            def compute_bleu(meters):
-                import inspect
+            if max(totals) > 0:
+                # log counts as numpy arrays -- log_scalar will sum them correctly
+                metrics.log_scalar("_bleu_counts", np.array(counts))
+                metrics.log_scalar("_bleu_totals", np.array(totals))
+                metrics.log_scalar("_bleu_sys_len", sum_logs("_bleu_sys_len"))
+                metrics.log_scalar("_bleu_ref_len", sum_logs("_bleu_ref_len"))
 
-                try:
-                    from sacrebleu.metrics import BLEU
+                def compute_bleu(meters):
+                    import inspect
 
-                    comp_bleu = BLEU.compute_bleu
-                except ImportError:
-                    # compatibility API for sacrebleu 1.x
-                    import sacrebleu
+                    try:
+                        from sacrebleu.metrics import BLEU
 
-                    comp_bleu = sacrebleu.compute_bleu
+                        comp_bleu = BLEU.compute_bleu
+                    except ImportError:
+                        # compatibility API for sacrebleu 1.x
+                        import sacrebleu
 
-                fn_sig = inspect.getfullargspec(comp_bleu)[0]
-                if "smooth_method" in fn_sig:
-                    smooth = {"smooth_method": "exp"}
-                else:
-                    smooth = {"smooth": "exp"}
-                bleu = comp_bleu(
-                    correct=meters["_bleu_counts"].sum,
-                    total=meters["_bleu_totals"].sum,
-                    sys_len=meters["_bleu_sys_len"].sum,
-                    ref_len=meters["_bleu_ref_len"].sum,
-                    **smooth,
-                )
-                return round(bleu.score, 2)
-            metrics.log_derived("bleu", compute_bleu)
+                        comp_bleu = sacrebleu.compute_bleu
+
+                    fn_sig = inspect.getfullargspec(comp_bleu)[0]
+                    if "smooth_method" in fn_sig:
+                        smooth = {"smooth_method": "exp"}
+                    else:
+                        smooth = {"smooth": "exp"}
+                    bleu = comp_bleu(
+                        correct=meters["_bleu_counts"].sum,
+                        total=meters["_bleu_totals"].sum,
+                        sys_len=meters["_bleu_sys_len"].sum,
+                        ref_len=meters["_bleu_ref_len"].sum,
+                        **smooth,
+                    )
+                    return round(bleu.score, 2)
+
+                metrics.log_derived("bleu", compute_bleu)
 
     def max_positions(self):
         """Return the max sentence length allowed by the task."""
@@ -486,7 +473,6 @@ class TranslationTask(FairseqTask):
                 # alternative that is unlikely to appear in the real
                 # reference, but doesn't get split into multiple tokens.
                 unk_string=("UNKNOWNTOKENINREF" if escape_unk else "UNKNOWNTOKENINHYP"),
-                extra_symbols_to_ignore=get_symbols_to_strip_from_output(generator)
             )
             if self.tokenizer:
                 s = self.tokenizer.decode(s)
@@ -508,4 +494,4 @@ class TranslationTask(FairseqTask):
         if self.cfg.eval_tokenized_bleu:
             return sacrebleu.corpus_bleu(hyps, [refs], tokenize="none")
         else:
-            return sacrebleu.corpus_bleu(hyps, [refs], tokenize=self.cfg.sacrebleu_tokenizer)
+            return sacrebleu.corpus_bleu(hyps, [refs])

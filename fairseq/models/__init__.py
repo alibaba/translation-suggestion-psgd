@@ -102,6 +102,7 @@ def build_model(cfg: FairseqDataclass, task, from_checkpoint=False):
         "Available models: {}".format(MODEL_DATACLASS_REGISTRY.keys())
         + f" Requested model type: {model_type}"
     )
+
     return model.build_model(cfg, task)
 
 

@@ -121,8 +121,7 @@ class MultilingualDenoisingTask(DenoisingTask):
             languages = self.langs.split(",")
             for name in languages:
                 p = os.path.join(data_path, name)
-                logger.warning("data not found: {}".format(p))
-                # assert os.path.exists(p), "data not found: {}".format(p)
+                assert os.path.exists(p), "data not found: {}".format(p)
 
         logger.info("Training on {0} languages: {1}".format(len(languages), languages))
         logger.info(
@@ -142,11 +141,9 @@ class MultilingualDenoisingTask(DenoisingTask):
                 combine=combine,
             )
             if dataset is None:
-                logger.warning("Dataset not found: {} ({})".format(split, split_path))
-                continue
-                # raise FileNotFoundError(
-                #     "Dataset not found: {} ({})".format(split, split_path)
-                # )
+                raise FileNotFoundError(
+                    "Dataset not found: {} ({})".format(split, split_path)
+                )
 
             end_token = (
                 self.source_dictionary.index("[{}]".format(language))

@@ -139,7 +139,6 @@ class TransformerEncoderBase(FairseqEncoder):
         src_lengths: Optional[torch.Tensor] = None,
         return_all_hiddens: bool = False,
         token_embeddings: Optional[torch.Tensor] = None,
-        src_lang_id: Optional[torch.Tensor] = None
     ):
         """
         Args:

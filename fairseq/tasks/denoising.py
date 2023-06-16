@@ -94,16 +94,13 @@ class DenoisingTask(LegacyFairseqTask):
             type=float,
             help="shuffle this proportion of sentences in all inputs",
         )
-        try:
-            parser.add_argument(
-                "--mask-length",
-                default="subword",
-                type=str,
-                choices=["subword", "word", "span-poisson"],
-                help="mask length to choose",
-            )
-        except:
-            pass
+        parser.add_argument(
+            "--mask-length",
+            default="subword",
+            type=str,
+            choices=["subword", "word", "span-poisson"],
+            help="mask length to choose",
+        )
         parser.add_argument(
             "--replace-length",
             default=-1,

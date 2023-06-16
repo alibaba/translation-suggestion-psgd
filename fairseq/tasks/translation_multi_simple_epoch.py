@@ -8,8 +8,6 @@ import logging
 import time
 
 import torch
-from dataclasses import dataclass, field
-from typing import Optional
 from fairseq.data import (
     FairseqDataset,
     LanguagePairDataset,
@@ -21,13 +19,10 @@ from fairseq.data.multilingual.multilingual_data_manager import (
     MultilingualDatasetManager,
 )
 from fairseq.data.multilingual.sampling_method import SamplingMethod
-from fairseq.tasks import FairseqTask, LegacyFairseqTask, register_task
-from fairseq.tasks.translation import TranslationTask
+from fairseq.tasks import LegacyFairseqTask, register_task
 from fairseq.utils import FileContentsAction
-from fairseq.data.indexed_dataset import get_available_dataset_impl
-from fairseq.dataclass import ChoiceEnum, FairseqDataclass
-from fairseq.dataclass.utils import gen_parser_from_dataclass
-from omegaconf import II
+
+
 ###
 def get_time_gap(s, e):
     return (
@@ -39,73 +34,10 @@ def get_time_gap(s, e):
 
 
 logger = logging.getLogger(__name__)
-@dataclass
-class TranslationMultiSimpleEpochConfig(FairseqDataclass):
-    source_lang: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "source language",
-            "argparse_alias": "-s",
-        },
-    )
-    target_lang: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "target language",
-            "argparse_alias": "-t",
-        },
-    )
-    num_batch_buckets: int = field(
-        default=0,
-        metadata={
-            "help": "if >0, then bucket source and target lengths into "
-            "N buckets and pad accordingly; this is useful on TPUs to minimize the number of compilations"
-        },
-    )
-    train_subset: str = II("dataset.train_subset")
-    dataset_impl: Optional[ChoiceEnum(get_available_dataset_impl())] = II(
-        "dataset.dataset_impl"
-    )
-    required_seq_len_multiple: int = II("dataset.required_seq_len_multiple")
-
-    # options for reporting BLEU during validation
-    eval_bleu: bool = field(
-        default=False, metadata={"help": "evaluation with BLEU scores"}
-    )
-    eval_bleu_args: Optional[str] = field(
-        default="{}",
-        metadata={
-            "help": 'generation args for BLUE scoring, e.g., \'{"beam": 4, "lenpen": 0.6}\', as JSON string'
-        },
-    )
-    eval_bleu_detok: str = field(
-        default="space",
-        metadata={
-            "help": "detokenize before computing BLEU (e.g., 'moses'); required if using --eval-bleu; "
-            "use 'space' to disable detokenization; see fairseq.data.encoders for other options"
-        },
-    )
-    eval_bleu_detok_args: Optional[str] = field(
-        default="{}",
-        metadata={"help": "args for building the tokenizer, if needed, as JSON string"},
-    )
-    eval_tokenized_bleu: bool = field(
-        default=False, metadata={"help": "compute tokenized BLEU instead of sacrebleu"}
-    )
-    eval_bleu_remove_bpe: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "remove BPE before computing BLEU",
-            "argparse_const": "@@ ",
-        },
-    )
-    eval_bleu_print_samples: bool = field(
-        default=False, metadata={"help": "print sample generations during validation"}
-    )
 
 
 @register_task("translation_multi_simple_epoch")
-class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
+class TranslationMultiSimpleEpochTask(LegacyFairseqTask):
     """
     Translate from one (source) language to another (target) language.
 
@@ -126,15 +58,15 @@ class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
         :ref: fairseq.tasks.translation_parser
         :prog:
     """
+
     @staticmethod
     def add_args(parser):
         """Add task-specific arguments to the parser."""
         # fmt: off
-        gen_parser_from_dataclass(parser, TranslationMultiSimpleEpochConfig())
-        # parser.add_argument('-s', '--source-lang', default=None, metavar='SRC',
-        #                     help='inference source language')
-        # parser.add_argument('-t', '--target-lang', default=None, metavar='TARGET',
-        #                     help='inference target language')
+        parser.add_argument('-s', '--source-lang', default=None, metavar='SRC',
+                            help='inference source language')
+        parser.add_argument('-t', '--target-lang', default=None, metavar='TARGET',
+                            help='inference target language')
         parser.add_argument('--lang-pairs', default=None, metavar='PAIRS',
                             help='comma-separated list of language pairs (in training order): en-de,en-fr,de-fr',
                             action=FileContentsAction)
@@ -146,9 +78,7 @@ class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
         # fmt: on
 
     def __init__(self, args, langs, dicts, training):
-        LegacyFairseqTask.__init__(self, args)
-        TranslationTask.__init__(self, args, None, None)
-        self.cfg=args
+        super().__init__(args)
         self.langs = langs
         self.dicts = dicts
         self.training = training
@@ -174,8 +104,6 @@ class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
         self.data_manager = MultilingualDatasetManager.setup_data_manager(
             args, self.lang_pairs, langs, dicts, self.sampling_method
         )
-        self.src_dict = self.source_dictionary
-        self.tgt_dict = self.target_dictionary
 
     def check_dicts(self, dicts, source_langs, target_langs):
         if self.args.source_dict is not None or self.args.target_dict is not None:
@@ -241,13 +169,13 @@ class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
         )
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):
-        # if constraints is not None:
-        #     raise NotImplementedError(
-        #         "Constrained decoding with the multilingual_translation task is not supported"
-        #     )
+        if constraints is not None:
+            raise NotImplementedError(
+                "Constrained decoding with the multilingual_translation task is not supported"
+            )
 
         src_data = ListDataset(src_tokens, src_lengths)
-        dataset = LanguagePairDataset(src_data, src_lengths, self.source_dictionary, constraints=constraints)
+        dataset = LanguagePairDataset(src_data, src_lengths, self.source_dictionary)
         src_langtok_spec, tgt_langtok_spec = self.args.langtoks["main"]
         if self.args.lang_tok_replacing_bos_eos:
             dataset = self.data_manager.alter_dataset_langtok(
@@ -278,15 +206,11 @@ class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
         if not getattr(args, "keep_inference_langtok", False):
             _, tgt_langtok_spec = self.args.langtoks["main"]
             if tgt_langtok_spec:
-                if self.args.target_lang is not None:
-                    tgt_lang_tok = {self.data_manager.get_decoder_langtok(
-                        self.args.target_lang, tgt_langtok_spec
-                    )}
-                else:
-                    tgt_lang_tok = set([self.data_manager.get_decoder_langtok(tgt_lang, tgt_langtok_spec) for tgt_lang in self.target_langs])
+                tgt_lang_tok = self.data_manager.get_decoder_langtok(
+                    self.args.target_lang, tgt_langtok_spec
+                )
                 extra_gen_cls_kwargs = extra_gen_cls_kwargs or {}
-                extra_gen_cls_kwargs["symbols_to_strip_from_output"] = tgt_lang_tok
-                print('extra gen cls kwargs: ', extra_gen_cls_kwargs, flush=True)
+                extra_gen_cls_kwargs["symbols_to_strip_from_output"] = {tgt_lang_tok}
 
         return super().build_generator(
             models, args, seq_gen_cls=None, extra_gen_cls_kwargs=extra_gen_cls_kwargs
@@ -305,7 +229,7 @@ class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
         with torch.no_grad():
             _, tgt_langtok_spec = self.args.langtoks["main"]
             if not self.args.lang_tok_replacing_bos_eos:
-                if self.args.target_lang is not None:
+                if prefix_tokens is None and tgt_langtok_spec:
                     tgt_lang_tok = self.data_manager.get_decoder_langtok(
                         self.args.target_lang, tgt_langtok_spec
                     )
@@ -314,11 +238,6 @@ class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
                     prefix_tokens = (
                         torch.LongTensor([[tgt_lang_tok]]).expand(bsz, 1).to(src_tokens)
                     )
-                elif self.args.enable_lang_ids:
-                    prefix_tokens = sample['tgt_lang_id']
-                else:
-                    logger.warning('tgt_langtok_spec is set. Howerver, neither target-lang or enable-lang-ids is set, the outputs may be out of control')
-                    prefix_tokens = None
                 return generator.generate(
                     models,
                     sample,
@@ -326,22 +245,15 @@ class TranslationMultiSimpleEpochTask(TranslationTask, LegacyFairseqTask):
                     constraints=constraints,
                 )
             else:
-                if not tgt_langtok_spec:
-                    bos_token = self.target_dictionary.eos(),
-                elif self.args.target_lang is not None:
-                    bos_token = self.data_manager.get_decoder_langtok(
-                        self.args.target_lang, tgt_langtok_spec
-                    )
-                elif self.args.enable_lang_ids:
-                    bos_token = sample['tgt_lang_id']
-                else:
-                    logger.warning('tgt_langtok_spec is set. Howerver, neither target-lang or enable-lang-ids is set, the outputs may be out of control')
-                    bos_token = self.target_dictionary.eos()
                 return generator.generate(
                     models,
                     sample,
                     prefix_tokens=prefix_tokens,
-                    bos_token=bos_token
+                    bos_token=self.data_manager.get_decoder_langtok(
+                        self.args.target_lang, tgt_langtok_spec
+                    )
+                    if tgt_langtok_spec
+                    else self.target_dictionary.eos(),
                 )
 
     def reduce_metrics(self, logging_outputs, criterion):

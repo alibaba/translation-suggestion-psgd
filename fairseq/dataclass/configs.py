@@ -1001,16 +1001,6 @@ class GenerationConfig(FairseqDataclass):
         default=None,
         metadata={"help": "EOS token"},
     )
-    forced_start_token: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "forced start token, useful for multilingual translation",
-        }
-    )
-    patience: Optional[int] = field(
-        default=0,
-        metadata={"help": "use constrained decoding with patience"}
-    )
 
 
 @dataclass
@@ -1081,14 +1071,6 @@ class InteractiveConfig(FairseqDataclass):
     input: str = field(
         default="-",
         metadata={"help": "file to read from; use - for stdin"},
-    )
-    prefix_index: int = field(
-        default=0,
-        metadata={"help": "prefix column index (sep by \\t, start from 0), 0 means no prefix"}
-    )
-    suffix_index: int = field(
-        default=0,
-        metadata={"help": "suffix column index (sep by \\t, start from 0), 0 means no suffix"}
     )
 
 

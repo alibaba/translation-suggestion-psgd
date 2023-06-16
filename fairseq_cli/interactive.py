@@ -34,6 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fairseq_cli.interactive")
 
+
 Batch = namedtuple("Batch", "ids src_tokens src_lengths constraints")
 Translation = namedtuple("Translation", "src_str hypos pos_scores alignments")
 
@@ -119,11 +120,11 @@ def main(cfg: FairseqConfig):
         cfg.dataset.batch_size = 1
 
     assert (
-            not cfg.generation.sampling or cfg.generation.nbest == cfg.generation.beam
+        not cfg.generation.sampling or cfg.generation.nbest == cfg.generation.beam
     ), "--sampling requires --nbest to be equal to --beam"
     assert (
-            not cfg.dataset.batch_size
-            or cfg.dataset.batch_size <= cfg.interactive.buffer_size
+        not cfg.dataset.batch_size
+        or cfg.dataset.batch_size <= cfg.interactive.buffer_size
     ), "--batch-size cannot be larger than --buffer-size"
 
     logger.info(cfg)
@@ -172,16 +173,10 @@ def main(cfg: FairseqConfig):
     bpe = task.build_bpe(cfg.bpe)
 
     def encode_fn(x):
-        has_eos = False
-        if x.endswith("</s>"):
-            has_eos = True
-            x = x[:-4].strip()
         if tokenizer is not None:
             x = tokenizer.encode(x)
         if bpe is not None:
             x = bpe.encode(x)
-        if has_eos:
-            x = x + ' </s>'
         return x
 
     def decode_fn(x):

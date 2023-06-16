@@ -133,37 +133,25 @@ class MultilingualDatasetManager(object):
             help="language token styles",
         )
 
-        try:
-            parser.add_argument(
-                "--load-alignments",
-                action="store_true",
-                help="load the binarized alignments",
-            )
-        except ArgumentError:
-            # this might have already been defined. Once we transition this to hydra it should be fine to add it here.
-            pass
-        try:
-            parser.add_argument(
-                "--left-pad-source",
-                default="True",
-                type=str,
-                metavar="BOOL",
-                help="pad the source on the left",
-            )
-        except ArgumentError:
-            # this might have already been defined. Once we transition this to hydra it should be fine to add it here.
-            pass
-        try:
-            parser.add_argument(
-                "--left-pad-target",
-                default="False",
-                type=str,
-                metavar="BOOL",
-                help="pad the target on the left",
-            )
-        except ArgumentError:
-            # this might have already been defined. Once we transition this to hydra it should be fine to add it here.
-            pass
+        parser.add_argument(
+            "--load-alignments",
+            action="store_true",
+            help="load the binarized alignments",
+        )
+        parser.add_argument(
+            "--left-pad-source",
+            default="True",
+            type=str,
+            metavar="BOOL",
+            help="pad the source on the left",
+        )
+        parser.add_argument(
+            "--left-pad-target",
+            default="False",
+            type=str,
+            metavar="BOOL",
+            help="pad the target on the left",
+        )
         try:
             parser.add_argument(
                 "--max-source-positions",
@@ -172,10 +160,6 @@ class MultilingualDatasetManager(object):
                 metavar="N",
                 help="max number of tokens in the source sequence",
             )
-        except ArgumentError:
-            # this might have already been defined. Once we transition this to hydra it should be fine to add it here.
-            pass
-        try:
             parser.add_argument(
                 "--max-target-positions",
                 default=1024,
@@ -186,26 +170,18 @@ class MultilingualDatasetManager(object):
         except ArgumentError:
             # this might have already been defined. Once we transition this to hydra it should be fine to add it here.
             pass
-        try:
-            parser.add_argument(
-                "--upsample-primary",
-                default=1,
-                type=int,
-                help="amount to upsample primary dataset",
-            )
-        except ArgumentError:
-            # this might have already been defined. Once we transition this to hydra it should be fine to add it here.
-            pass
-        try:
-            parser.add_argument(
-                "--truncate-source",
-                action="store_true",
-                default=False,
-                help="truncate source to max-source-positions",
-            )
-        except ArgumentError:
-            # this might have already been defined. Once we transition this to hydra it should be fine to add it here.
-            pass
+        parser.add_argument(
+            "--upsample-primary",
+            default=1,
+            type=int,
+            help="amount to upsample primary dataset",
+        )
+        parser.add_argument(
+            "--truncate-source",
+            action="store_true",
+            default=False,
+            help="truncate source to max-source-positions",
+        )
         parser.add_argument(
             "--encoder-langtok",
             default=None,
@@ -849,14 +825,12 @@ class MultilingualDatasetManager(object):
             tgt_dataset_transform_func=lambda dataset: tgt_dataset_transform_func(
                 src, tgt, dataset, tgt_langtok_spec
             ),
-            src_lang_id=self.get_encoder_langtok(src, tgt, src_langtok_spec) if enable_lang_ids else None,
-            tgt_lang_id=self.get_decoder_langtok(tgt, tgt_langtok_spec) if enable_lang_ids else None,
-            # src_lang_id=_lang_id(lang_dictionary, src)
-            # if enable_lang_ids and lang_dictionary is not None
-            # else None,
-            # tgt_lang_id=_lang_id(lang_dictionary, tgt)
-            # if enable_lang_ids and lang_dictionary is not None
-            # else None,
+            src_lang_id=_lang_id(lang_dictionary, src)
+            if enable_lang_ids and lang_dictionary is not None
+            else None,
+            tgt_lang_id=_lang_id(lang_dictionary, tgt)
+            if enable_lang_ids and lang_dictionary is not None
+            else None,
             langpairs_sharing_datasets=langpairs_sharing_datasets,
         )
         # TODO: handle modified lang toks for mined data and dae data
